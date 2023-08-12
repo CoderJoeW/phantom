@@ -51,11 +51,11 @@ func (cm *ClientMap) Close() {
 	// Stop loop in goroutine
 	cm.dead.Set()
 
-	cm.mutex.RLock()
+	cm.mutex.Lock()
+	defer cm.mutex.Unlock()
 	for _, client := range cm.clients {
 		client.conn.Close()
 	}
-	cm.mutex.RUnlock()
 }
 
 // Cleans up clients and remote connections that have not been used in a while.
@@ -63,20 +63,28 @@ func (cm *ClientMap) Close() {
 func (cm *ClientMap) idleCleanupLoop() {
 	log.Info().Msg("Starting idle connection handler")
 
-	// Loop forever using a channel that emits every IdleCheckInterval
 	for currentTime := range time.Tick(cm.IdleCheckInterval) {
-		// Stop the idle cleanup goroutine if the proxy stopped
 		if cm.dead.IsSet() {
 			break
 		}
 
-		cm.mutex.Lock()
+		// Copy keys that need to be deleted
+		keysToDelete := []string{}
+
+		cm.mutex.RLock()
 		for key, client := range cm.clients {
 			if client.lastActive.Add(cm.IdleTimeout).Before(currentTime) {
 				log.Info().Msgf("Cleaning up idle connection: %s", key)
-				cm.clients[key].conn.Close()
-				delete(cm.clients, key)
+				client.conn.Close()
+				keysToDelete = append(keysToDelete, key)
 			}
+		}
+		cm.mutex.RUnlock()
+
+		// Delete the keys
+		cm.mutex.Lock()
+		for _, key := range keysToDelete {
+			delete(cm.clients, key)
 		}
 		cm.mutex.Unlock()
 	}
@@ -86,13 +94,12 @@ func (cm *ClientMap) Delete(clientAddr net.Addr) {
 	key := clientAddr.String()
 
 	cm.mutex.Lock()
+	defer cm.mutex.Unlock()
 
 	if client, exists := cm.clients[key]; exists {
 		client.conn.Close()
 		delete(cm.clients, key)
 	}
-
-	cm.mutex.Unlock()
 }
 
 // Get gets or creates a new UDP connection to the remote server and stores it
